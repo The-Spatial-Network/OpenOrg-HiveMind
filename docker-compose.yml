@@ -1,0 +1,374 @@
+version: '3.8'
+
+networks:
+  hivemind:
+    driver: bridge
+
+volumes:
+  zulip_data:
+  nextcloud_data:
+  gitea_data:
+  elasticsearch_data:
+  jaeger_data:
+  postgres_data:
+  redis_data:
+  n8n_data:
+  flowise_data:
+  jaguar_data:
+
+services:
+  # Reverse Proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: hivemind-traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # Database Services
+  postgres:
+    image: postgres:15
+    container_name: hivemind-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hivemind}
+      POSTGRES_USER: ${POSTGRES_USER:-hivemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: hivemind-redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # Collaboration Tools
+  zulip:
+    image: zulip/docker-zulip:8.0-0
+    container_name: hivemind-zulip
+    environment:
+      SETTING_EXTERNAL_HOST: ${ZULIP_HOST:-localhost:8080}
+      SETTING_ZULIP_ADMINISTRATOR: ${ZULIP_ADMIN:-admin@example.com}
+      SECRETS_email_password: ${ZULIP_EMAIL_PASSWORD:-}
+      SECRETS_rabbitmq_password: ${ZULIP_RABBITMQ_PASSWORD:-changeme}
+      SECRETS_postgres_password: ${POSTGRES_PASSWORD:-changeme}
+      SECRETS_memcached_password: ${ZULIP_MEMCACHED_PASSWORD:-changeme}
+      SECRETS_redis_password: ${ZULIP_REDIS_PASSWORD:-changeme}
+      SECRETS_secret_key: ${ZULIP_SECRET_KEY:-changeme}
+      SETTING_EMAIL_HOST: ${EMAIL_HOST:-}
+      SETTING_EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+    ports:
+      - "8080:80"
+    volumes:
+      - zulip_data:/data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  jitsi-web:
+    image: jitsi/web:stable
+    container_name: hivemind-jitsi-web
+    environment:
+      - ENABLE_LETSENCRYPT=0
+      - ENABLE_HTTP_REDIRECT=1
+      - DISABLE_HTTPS=1
+      - JICOFO_AUTH_USER=focus
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_BOSH_URL_BASE=http://jitsi-prosody:5280
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - TZ=UTC
+    ports:
+      - "8443:80"
+    networks:
+      - hivemind
+    depends_on:
+      - jitsi-prosody
+    restart: unless-stopped
+
+  jitsi-prosody:
+    image: jitsi/prosody:stable
+    container_name: hivemind-jitsi-prosody
+    environment:
+      - AUTH_TYPE=internal
+      - ENABLE_GUESTS=1
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_MUC_DOMAIN=muc.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JICOFO_COMPONENT_SECRET=jicofo-secret
+      - JVB_AUTH_USER=jvb
+      - JVB_AUTH_PASSWORD=jvb-password
+      - JICOFO_AUTH_USER=focus
+      - JICOFO_AUTH_PASSWORD=focus-password
+      - TZ=UTC
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  jitsi-jicofo:
+    image: jitsi/jicofo:stable
+    container_name: hivemind-jitsi-jicofo
+    environment:
+      - XMPP_DOMAIN=meet.jitsi
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JICOFO_COMPONENT_SECRET=jicofo-secret
+      - JICOFO_AUTH_USER=focus
+      - JICOFO_AUTH_PASSWORD=focus-password
+      - TZ=UTC
+    depends_on:
+      - jitsi-prosody
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  jitsi-jvb:
+    image: jitsi/jvb:stable
+    container_name: hivemind-jitsi-jvb
+    environment:
+      - XMPP_AUTH_DOMAIN=auth.meet.jitsi
+      - XMPP_INTERNAL_MUC_DOMAIN=internal-muc.meet.jitsi
+      - JVB_AUTH_USER=jvb
+      - JVB_AUTH_PASSWORD=jvb-password
+      - JVB_STUN_SERVERS=meet-jit-si-turnrelay.jitsi.net:443
+      - JICOFO_AUTH_USER=focus
+      - TZ=UTC
+    ports:
+      - "10000:10000/udp"
+    depends_on:
+      - jitsi-prosody
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  nextcloud:
+    image: nextcloud:28
+    container_name: hivemind-nextcloud
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: ${POSTGRES_USER:-hivemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_HOST: postgres
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-changeme}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_TRUSTED_DOMAINS:-localhost}
+    ports:
+      - "8081:80"
+    volumes:
+      - nextcloud_data:/var/www/html
+    depends_on:
+      - postgres
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  gitea:
+    image: gitea/gitea:1.21
+    container_name: hivemind-gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=${POSTGRES_USER:-hivemind}
+      - GITEA__database__PASSWD=${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "3000:3000"
+      - "222:22"
+    volumes:
+      - gitea_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - postgres
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # Telemetry & Monitoring
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: hivemind-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.51
+    container_name: hivemind-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=elasticsearch
+      - ES_SERVER_URLS=http://elasticsearch:9200
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger collector HTTP
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+    depends_on:
+      - elasticsearch
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.89.0
+    container_name: hivemind-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./config/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "8888:8888"   # Prometheus metrics
+      - "8889:8889"   # Prometheus exporter metrics
+    depends_on:
+      - jaeger
+      - elasticsearch
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # AI & Automation Tools
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: hivemind-open-webui
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-changeme}
+    ports:
+      - "3001:8080"
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hivemind-ollama
+    volumes:
+      - ./data/ollama:/root/.ollama
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: hivemind-n8n
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-hivemind}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-changeme}
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - postgres
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  flowise:
+    image: flowiseai/flowise:latest
+    container_name: hivemind-flowise
+    environment:
+      - DATABASE_TYPE=postgres
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=flowise
+      - DATABASE_USER=${POSTGRES_USER:-hivemind}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - FLOWISE_USERNAME=${FLOWISE_USERNAME:-admin}
+      - FLOWISE_PASSWORD=${FLOWISE_PASSWORD:-changeme}
+    ports:
+      - "3002:3000"
+    volumes:
+      - flowise_data:/root/.flowise
+    depends_on:
+      - postgres
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # Vector Database
+  jaguar:
+    image: jaguardb/jaguardb:latest
+    container_name: hivemind-jaguar
+    environment:
+      - JAGUAR_HOME=/opt/jaguar
+    ports:
+      - "8888:8888"
+    volumes:
+      - jaguar_data:/opt/jaguar/data
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # Coding Agent (placeholder - to be implemented)
+  coding-agent:
+    image: alpine:latest
+    container_name: hivemind-coding-agent
+    command: ["sh", "-c", "echo 'Coding Agent placeholder - to be implemented' && sleep infinity"]
+    ports:
+      - "8082:8080"
+    networks:
+      - hivemind
+    restart: unless-stopped
+
+  # Data Pipeline & Integration
+  data-pipeline:
+    image: python:3.11-slim
+    container_name: hivemind-data-pipeline
+    command: ["sh", "-c", "echo 'Data Pipeline placeholder - to be implemented' && sleep infinity"]
+    volumes:
+      - ./scripts:/app/scripts
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-hivemind}
+      - POSTGRES_USER=${POSTGRES_USER:-hivemind}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - ELASTICSEARCH_HOST=elasticsearch:9200
+    depends_on:
+      - postgres
+      - elasticsearch
+    networks:
+      - hivemind
+    restart: unless-stopped
